@@ -25,6 +25,7 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
+import html
 import re
 import urllib.parse
 
@@ -85,6 +86,125 @@ ACCEPTABLE_URI_SCHEMES = (
 )
 
 _urifixer = re.compile("^([A-Za-z][A-Za-z0-9+-.]*://)(/*)(.*?)")
+
+
+# Form action attributes submit data to a URI.  They are listed separately so
+# that it is obvious that *every* one of them is checked, including attributes
+# that a future change may add to the attribute whitelist.
+FORM_ACTION_ATTRIBUTES = frozenset(
+    {
+        "action",
+        "formaction",
+    }
+)
+
+# Attributes whose value is a URI (or a URI reference), grouped by the element
+# semantics that give the attribute its URI meaning.  Renderers decode
+# character references in attribute values before interpreting them, so every
+# URI attribute must be validated on its decoded form.  This set is defined
+# here, in one place next to the scheme whitelist, so the sanitizer and the
+# relative URI resolver cannot drift apart.
+URI_ATTRIBUTES = (
+    frozenset(
+        {
+            # Navigation and links: a, area, link, blockquote, q, del, ins,
+            # img, iframe, frame, and the SVG a element.
+            "href",
+            "xlink:href",
+            "cite",
+            "longdesc",
+            "usemap",
+            "xml:base",
+            # Embedded or fetched resources: img, input, source, audio, video,
+            # object, command, body, table, td, th, tr.
+            "src",
+            "lowsrc",
+            "dynsrc",
+            "background",
+            "poster",
+            "data",
+            "datasrc",
+            "codebase",
+            "classid",
+            "icon",
+            # Document-level metadata: head profile, html manifest.
+            "profile",
+            "manifest",
+            # Notification endpoints: a ping, area ping.
+            "ping",
+            # MathML: maction/math href and mrow altimg.
+            "altimg",
+        }
+    )
+    | FORM_ACTION_ATTRIBUTES
+)
+
+# Attributes that hold a whitespace-separated list of URIs.  A renderer
+# splits the value after decoding it, so every item is validated separately.
+SEPARATED_URI_ATTRIBUTES = frozenset({"ping"})
+
+# Character references can be nested (`&amp;#106;avascript:`).  Values are
+# decoded to a stable state so a second encoding cannot hide a scheme.
+# The bound guarantees termination; a value that does not stabilize within
+# the bound is treated as unsafe.
+ENTITY_DECODE_MAX_ROUNDS = 8
+
+
+def decode_entity_encoded_value(value: str) -> str | None:
+    """Decode character references until the value reaches a stable state.
+
+    Nested encodings are decoded round after round, matching what a renderer
+    does when it decodes an attribute value more than once.  Returns ``None``
+    when the value does not stabilize within
+    :data:`ENTITY_DECODE_MAX_ROUNDS` rounds; callers must treat that as unsafe.
+    """
+
+    for _ in range(ENTITY_DECODE_MAX_ROUNDS):
+        decoded = html.unescape(value)
+        if decoded == value:
+            return value
+        value = decoded
+    return None
+
+
+def uri_scheme_is_acceptable(value: str) -> bool:
+    """Return ``True`` if *value* uses no scheme or an acceptable scheme."""
+
+    if not ACCEPTABLE_URI_SCHEMES:
+        return True
+    try:
+        scheme = urllib.parse.urlparse(value)[0]
+    except ValueError:
+        return False
+    return not scheme or scheme in ACCEPTABLE_URI_SCHEMES
+
+
+def make_safe_uri(attribute: str, value: str) -> str:
+    """Validate a URI-valued attribute and clear it if its scheme is unsafe.
+
+    The value is decoded to a stable state first, then every URI it contains
+    (one, or several for list-valued attributes such as ``ping``) is checked
+    against :data:`ACCEPTABLE_URI_SCHEMES`.
+
+    The *original* value is returned when it is acceptable.  The decoded form
+    is used only for inspection, so the sanitizer's output for safe content
+    keeps its existing escaping and character references unchanged.  An empty
+    string is returned when a dangerous scheme is found, which clears the
+    attribute value.
+    """
+
+    if not value:
+        return value
+    decoded = decode_entity_encoded_value(value)
+    if decoded is None:
+        return ""
+    if attribute in SEPARATED_URI_ATTRIBUTES:
+        candidates = decoded.split()
+    else:
+        candidates = [decoded]
+    if all(uri_scheme_is_acceptable(candidate) for candidate in candidates):
+        return value
+    return ""
 
 
 def _urljoin(base, uri):
@@ -154,18 +274,34 @@ class RelativeURIResolver(BaseHTMLProcessor):
         self.baseuri = baseuri
 
     def resolve_uri(self, uri):
-        return make_safe_absolute_uri(self.baseuri, uri.strip())
+        """Resolve *uri* against the base URI, after checking its scheme.
+
+        The scheme check runs on the decoded value so that character
+        references cannot hide a dangerous scheme from this pass; the URI that
+        is resolved and emitted is otherwise unchanged.
+        """
+
+        uri = uri.strip()
+        decoded = decode_entity_encoded_value(uri)
+        if decoded is None:
+            return ""
+        if uri_scheme_is_acceptable(decoded):
+            return make_safe_absolute_uri(self.baseuri, uri)
+        return ""
 
     def unknown_starttag(self, tag, attrs):
         attrs = self.normalize_attrs(attrs)
-        attrs = [
-            (
-                key,
-                ((tag, key) in self.relative_uris) and self.resolve_uri(value) or value,
-            )
-            for key, value in attrs
-        ]
-        super().unknown_starttag(tag, attrs)
+        resolved = []
+        for key, value in attrs:
+            if (tag, key) in self.relative_uris:
+                # Resolution re-checks the decoded value (see resolve_uri).
+                value = self.resolve_uri(value)
+            elif key in URI_ATTRIBUTES:
+                # Not resolved, but still validated on its decoded value so
+                # that this pass and the sanitizer use the same rule.
+                value = make_safe_uri(key, value)
+            resolved.append((key, value))
+        super().unknown_starttag(tag, resolved)
 
 
 def resolve_relative_uris(html_source, base_uri, encoding, type_):

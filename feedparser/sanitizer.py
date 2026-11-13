@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 
 from .html import BaseHTMLProcessor
-from .urls import make_safe_absolute_uri
+from .urls import URI_ATTRIBUTES, make_safe_absolute_uri, make_safe_uri
 
 
 class HTMLSanitizer(BaseHTMLProcessor):
@@ -809,7 +809,14 @@ class HTMLSanitizer(BaseHTMLProcessor):
                     clean_attrs.append((key, clean_value))
             elif key in acceptable_attributes:
                 key = keymap.get(key, key)
-                # make sure the uri uses an acceptable uri scheme
+                # Make sure the URI uses an acceptable scheme.  Character
+                # references in the value are decoded first (repeatedly, to
+                # reach a stable state), because a renderer decodes them
+                # before it interprets the attribute.  A dangerous scheme
+                # clears the attribute value.
+                if key in URI_ATTRIBUTES:
+                    value = make_safe_uri(key, value)
+                # Hrefs may also need to be made absolute and re-checked.
                 if key == "href":
                     value = make_safe_absolute_uri(value)
                 clean_attrs.append((key, value))

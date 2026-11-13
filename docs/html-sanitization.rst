@@ -718,6 +718,30 @@ default in style attributes (all others are stripped):
     See the _HTMLSanitizer class for more details.
 
 
+.. _advanced.sanitization.uri-attributes:
+
+:abbr:`URI (Uniform Resource Identifier)` Attributes
+---------------------------------------------------
+
+Attributes whose value is a :abbr:`URI (Uniform Resource Identifier)` (such as
+``href``, ``src``, ``cite``, ``action``, and ``formaction``) are checked against
+the acceptable scheme list in :data:`feedparser.urls.ACCEPTABLE_URI_SCHEMES`.
+A dangerous scheme clears the attribute value, so the element remains but its
+attribute is empty.
+
+Because browsers decode character references in attribute values before they
+interpret them, the check runs on the decoded value.  Values are decoded
+repeatedly until they reach a stable state, so a nested encoding such as
+``&amp;#106;avascript:`` cannot slip through, and the check runs again after a
+relative :abbr:`URI (Uniform Resource Identifier)` has been made absolute.
+
+The list of checked attributes is defined once, in
+:data:`feedparser.urls.URI_ATTRIBUTES`, and is shared by the sanitizer and the
+relative :abbr:`URI (Uniform Resource Identifier)` resolver.  The decoded value
+is used only for inspection; the sanitized output keeps the content's original
+escaping and character references.
+
+
 Whitelist, Don't Blacklist
 --------------------------
 
